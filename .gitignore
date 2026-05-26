@@ -9,8 +9,6 @@ __pycache__/
 # Dataset local y archivos pesados generados
 dataset/*
 !dataset/.gitkeep
-models/*
-!models/.gitkeep
 
 # Archivos temporales
 *.tmp
