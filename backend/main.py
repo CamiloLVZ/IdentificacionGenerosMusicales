@@ -19,6 +19,7 @@ app = FastAPI(
 
 model = None
 label_encoder = None
+preprocessing_config = None
 
 
 @app.on_event("startup")
@@ -28,8 +29,8 @@ def startup_event():
 
     Si el modelo no existe, la API avisara con un error claro.
     """
-    global model, label_encoder
-    model, label_encoder = load_model_and_labels()
+    global model, label_encoder, preprocessing_config
+    model, label_encoder, preprocessing_config = load_model_and_labels()
 
 
 @app.get("/")
@@ -59,7 +60,7 @@ async def predict(file: UploadFile = File(...)):
         if len(wav_bytes) == 0:
             raise HTTPException(status_code=400, detail="El archivo esta vacio.")
 
-        return predict_genre(model, label_encoder, wav_bytes)
+        return predict_genre(model, label_encoder, preprocessing_config, wav_bytes)
 
     except HTTPException:
         raise
@@ -68,4 +69,3 @@ async def predict(file: UploadFile = File(...)):
             status_code=500,
             detail=f"No fue posible procesar el audio: {error}",
         )
-

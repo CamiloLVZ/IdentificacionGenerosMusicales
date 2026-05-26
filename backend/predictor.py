@@ -9,6 +9,7 @@ import pickle
 import sys
 import tempfile
 from pathlib import Path
+import json
 
 import numpy as np
 import tensorflow as tf
@@ -24,6 +25,7 @@ from preprocessing import process_audio_file  # noqa: E402
 
 MODEL_PATH = PROJECT_ROOT / "models" / "best_model.keras"
 LABEL_ENCODER_PATH = PROJECT_ROOT / "models" / "label_encoder.pkl"
+PREPROCESSING_CONFIG_PATH = PROJECT_ROOT / "models" / "preprocessing_config.json"
 
 
 def load_model_and_labels():
@@ -43,10 +45,22 @@ def load_model_and_labels():
     with open(LABEL_ENCODER_PATH, "rb") as file:
         label_encoder = pickle.load(file)
 
-    return model, label_encoder
+    preprocessing_config = {
+        "feature_type": "mel",
+        # Valores compatibles con el primer modelo del proyecto. Cuando se
+        # reentrena con la nueva version, train.py guarda esta configuracion.
+        "segment_duration": 10.0,
+        "overlap": 0.0,
+    }
+
+    if PREPROCESSING_CONFIG_PATH.exists():
+        with open(PREPROCESSING_CONFIG_PATH, "r", encoding="utf-8") as file:
+            preprocessing_config.update(json.load(file))
+
+    return model, label_encoder, preprocessing_config
 
 
-def predict_genre(model, label_encoder, wav_bytes):
+def predict_genre(model, label_encoder, preprocessing_config, wav_bytes):
     """
     Predice el genero a partir de bytes de un archivo WAV.
 
@@ -63,15 +77,21 @@ def predict_genre(model, label_encoder, wav_bytes):
             temp_file.write(wav_bytes)
             temp_path = temp_file.name
 
-        spectrogram = process_audio_file(temp_path)
+        segments = process_audio_file(
+            temp_path,
+            feature_type=preprocessing_config["feature_type"],
+            segment_duration=preprocessing_config["segment_duration"],
+            overlap=preprocessing_config["overlap"],
+        )
 
     finally:
         if temp_path is not None:
             Path(temp_path).unlink(missing_ok=True)
 
-    # El modelo espera un batch. Por eso agregamos una dimension al inicio.
-    input_data = np.expand_dims(spectrogram, axis=0)
-    probabilities = model.predict(input_data)[0]
+    # El modelo predice cada segmento. Luego promediamos las probabilidades para
+    # obtener una sola respuesta para el audio completo.
+    segment_probabilities = model.predict(segments)
+    probabilities = np.mean(segment_probabilities, axis=0)
 
     predicted_index = int(np.argmax(probabilities))
     predicted_genre = label_encoder.inverse_transform([predicted_index])[0]

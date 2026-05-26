@@ -7,7 +7,7 @@ Esta guia explica como usar el sistema despues de tenerlo instalado y entrenado.
 Antes de usar la API o la interfaz, debes entrenar el modelo:
 
 ```bash
-python training/train.py --dataset_path dataset
+python training/train.py
 ```
 
 Al finalizar deben existir estos archivos:
@@ -15,6 +15,7 @@ Al finalizar deben existir estos archivos:
 ```text
 models/best_model.keras
 models/label_encoder.pkl
+models/preprocessing_config.json
 ```
 
 Sin esos archivos, la API no puede hacer predicciones.
@@ -114,3 +115,16 @@ Es normal. TensorFlow procesa muchos audios y ademas se aplican aumentos de dato
 python training/train.py --dataset_path dataset --epochs 10
 ```
 
+Si quieres una ejecucion mas corta mientras pruebas cambios:
+
+```bash
+python training/train.py --epochs 10 --cv_epochs 5 --skip_cross_validation
+```
+
+Los parametros principales estan en:
+
+```text
+training/config.py
+```
+
+Para uso normal no necesitas pasarlos por consola.

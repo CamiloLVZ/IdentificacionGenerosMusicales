@@ -14,6 +14,8 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
 )
 
+from preprocessing import process_audio_file
+
 
 def evaluate_model(model, x_test, y_test, class_names):
     """
@@ -44,6 +46,61 @@ def evaluate_model(model, x_test, y_test, class_names):
             output_dict=True,
         ),
         "confusion_matrix": confusion_matrix(y_test, y_pred).tolist(),
+    }
+
+
+def evaluate_model_on_files(
+    model,
+    file_paths,
+    labels,
+    label_encoder,
+    feature_type,
+    segment_duration,
+    overlap,
+):
+    """
+    Evalua por archivo completo.
+
+    Como ahora cada audio se divide en segmentos, primero se predice cada
+    segmento y luego se promedian las probabilidades. Esta evaluacion se parece
+    mas al uso real de la API.
+    """
+    y_true = []
+    y_pred = []
+
+    for file_path, label in zip(file_paths, labels):
+        segments = process_audio_file(
+            file_path,
+            feature_type=feature_type,
+            segment_duration=segment_duration,
+            overlap=overlap,
+        )
+        segment_probabilities = model.predict(segments, verbose=0)
+        probabilities = np.mean(segment_probabilities, axis=0)
+
+        y_true.append(label_encoder.transform([label])[0])
+        y_pred.append(int(np.argmax(probabilities)))
+
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_true,
+        y_pred,
+        average="weighted",
+        zero_division=0,
+    )
+
+    return {
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1_score": float(f1),
+        "classification_report": classification_report(
+            y_true,
+            y_pred,
+            target_names=label_encoder.classes_,
+            zero_division=0,
+            output_dict=True,
+        ),
+        "confusion_matrix": confusion_matrix(y_true, y_pred).tolist(),
     }
 
 
@@ -103,4 +160,3 @@ def plot_confusion_matrix(matrix, class_names, output_path, title):
     plt.tight_layout()
     plt.savefig(output_path)
     plt.close()
-

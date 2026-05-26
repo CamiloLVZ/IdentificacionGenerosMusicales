@@ -18,37 +18,35 @@ from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
+from sklearn.model_selection import StratifiedKFold
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 
+import config
+from augmentations import random_audio_augmentation, spec_augment
 from evaluation import (
-    evaluate_model,
+    evaluate_model_on_files,
     plot_confusion_matrix,
     plot_training_history,
-    save_json,
 )
 from models import build_cnn_bilstm, build_simple_cnn
 from preprocessing import (
-    EXPECTED_TIME_STEPS,
     GENRES,
-    N_MELS,
     RANDOM_SEED,
-    create_augmented_examples,
+    audio_to_features,
     get_dataset_files,
+    get_input_shape,
+    load_audio,
     process_audio_file,
+    split_audio_into_segments,
 )
+from utils import save_json, set_random_seed
 
 
-def set_random_seed(seed):
-    """Fija semillas para reducir variacion entre ejecuciones."""
-    np.random.seed(seed)
-    tf.random.set_seed(seed)
-
-
-def load_spectrograms(file_paths, labels):
+def load_features_without_augmentation(file_paths, labels, feature_type, segment_duration, overlap):
     """
-    Carga audios y genera espectrogramas sin aumento de datos.
+    Carga audios, los segmenta y genera features sin aumento de datos.
 
     Esta funcion se usa para validacion y prueba. Es importante no aumentar
     esos datos, porque queremos medir el rendimiento con audios reales.
@@ -58,30 +56,58 @@ def load_spectrograms(file_paths, labels):
 
     for index, (file_path, label) in enumerate(zip(file_paths, labels), start=1):
         print(f"Procesando {index}/{len(file_paths)}: {Path(file_path).name}")
-        spectrogram = process_audio_file(file_path)
-        x_data.append(spectrogram)
-        y_data.append(label)
+        features = process_audio_file(
+            file_path,
+            feature_type=feature_type,
+            segment_duration=segment_duration,
+            overlap=overlap,
+        )
+
+        for feature_matrix in features:
+            x_data.append(feature_matrix)
+            y_data.append(label)
 
     return np.array(x_data), np.array(y_data)
 
 
-def load_training_spectrograms(file_paths, labels):
+def load_training_features(
+    file_paths,
+    labels,
+    feature_type,
+    segment_duration,
+    overlap,
+    augmentations_per_segment,
+):
     """
-    Carga datos de entrenamiento y aplica aumento de datos.
+    Carga datos de entrenamiento con segmentacion y aumento de datos.
 
-    Por cada audio se crean 4 ejemplos: original, ruido, shift temporal y pitch.
-    Esto aumenta el conjunto de entrenamiento sin tocar validacion ni prueba.
+    Cada segmento original se conserva. Luego se crean algunas copias aumentadas
+    al azar. Esto sube la cantidad de ejemplos sin volver enorme el proyecto.
     """
     x_data = []
     y_data = []
 
     for index, (file_path, label) in enumerate(zip(file_paths, labels), start=1):
-        print(f"Aumentando {index}/{len(file_paths)}: {Path(file_path).name}")
-        spectrograms = create_augmented_examples(file_path)
+        print(f"Segmentando y aumentando {index}/{len(file_paths)}: {Path(file_path).name}")
+        audio, sr = load_audio(file_path)
+        segments = split_audio_into_segments(audio, sr, segment_duration, overlap)
 
-        for spectrogram in spectrograms:
-            x_data.append(spectrogram)
+        for segment in segments:
+            original_features = audio_to_features(segment, sr, feature_type, segment_duration)
+            x_data.append(original_features)
             y_data.append(label)
+
+            for _ in range(augmentations_per_segment):
+                augmented_audio = random_audio_augmentation(segment, sr)
+                augmented_features = audio_to_features(
+                    augmented_audio,
+                    sr,
+                    feature_type,
+                    segment_duration,
+                )
+                augmented_features = spec_augment(augmented_features)
+                x_data.append(augmented_features)
+                y_data.append(label)
 
     return np.array(x_data), np.array(y_data)
 
@@ -113,17 +139,26 @@ def split_dataset(audio_files, labels):
 
 def train_one_model(model_name, model, x_train, y_train, x_val, y_val, output_dir, epochs, batch_size):
     """Entrena un modelo y guarda la grafica de su historial."""
+    checkpoint_path = output_dir / "checkpoints" / f"{model_name}.keras"
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
     callbacks = [
         EarlyStopping(
             monitor="val_accuracy",
-            patience=8,
+            patience=10,
             restore_best_weights=True,
         ),
         ReduceLROnPlateau(
             monitor="val_loss",
             factor=0.5,
-            patience=4,
+            patience=5,
             min_lr=1e-6,
+        ),
+        ModelCheckpoint(
+            filepath=checkpoint_path,
+            monitor="val_accuracy",
+            save_best_only=True,
+            mode="max",
         ),
     ]
 
@@ -145,7 +180,84 @@ def train_one_model(model_name, model, x_train, y_train, x_val, y_val, output_di
     )
 
     best_val_accuracy = max(history.history["val_accuracy"])
+
+    if checkpoint_path.exists():
+        model = tf.keras.models.load_model(checkpoint_path)
+
     return model, history, best_val_accuracy
+
+
+def run_cross_validation(args, audio_files, labels, label_encoder, output_dir):
+    """
+    Ejecuta validacion cruzada estratificada de 2 particiones.
+
+    Se divide por archivo, no por segmento, para evitar que fragmentos de una
+    misma cancion aparezcan en entrenamiento y validacion al mismo tiempo.
+    """
+    print("\nIniciando validacion cruzada estratificada de 2 folds")
+
+    skf = StratifiedKFold(n_splits=2, shuffle=True, random_state=RANDOM_SEED)
+    fold_accuracies = []
+
+    for fold, (train_index, val_index) in enumerate(skf.split(audio_files, labels), start=1):
+        print(f"\nFold {fold}/2")
+
+        train_files = [audio_files[i] for i in train_index]
+        val_files = [audio_files[i] for i in val_index]
+        train_labels = [labels[i] for i in train_index]
+        val_labels = [labels[i] for i in val_index]
+
+        x_train, y_train_text = load_training_features(
+            train_files,
+            train_labels,
+            args.feature_type,
+            args.segment_duration,
+            args.overlap,
+            args.augmentations_per_segment,
+        )
+        x_val, y_val_text = load_features_without_augmentation(
+            val_files,
+            val_labels,
+            args.feature_type,
+            args.segment_duration,
+            args.overlap,
+        )
+
+        y_train = label_encoder.transform(y_train_text)
+        y_val = label_encoder.transform(y_val_text)
+
+        model = build_cnn_bilstm(
+            get_input_shape(args.feature_type, args.segment_duration),
+            len(label_encoder.classes_),
+        )
+
+        model, history, best_val_accuracy = train_one_model(
+            f"cross_validation_fold_{fold}_cnn_bilstm",
+            model,
+            x_train,
+            y_train,
+            x_val,
+            y_val,
+            output_dir,
+            args.cv_epochs,
+            args.batch_size,
+        )
+
+        fold_accuracies.append(float(best_val_accuracy))
+        plot_training_history(
+            history,
+            output_dir / "plots" / f"cross_validation_fold_{fold}_history.png",
+            f"CV Fold {fold}",
+        )
+
+    cv_results = {
+        "fold_accuracies": fold_accuracies,
+        "mean_accuracy": float(np.mean(fold_accuracies)),
+        "std_accuracy": float(np.std(fold_accuracies)),
+    }
+
+    save_json(cv_results, output_dir / "metrics" / "cross_validation.json")
+    return cv_results
 
 
 def main(args):
@@ -179,15 +291,32 @@ def main(args):
     y_val_text = np.array(validation_labels)
     y_test_text = np.array(test_labels)
 
-    x_train, y_train_text_augmented = load_training_spectrograms(train_files, y_train_text)
-    x_val, y_val_text = load_spectrograms(validation_files, y_val_text)
-    x_test, y_test_text = load_spectrograms(test_files, y_test_text)
+    if not args.skip_cross_validation:
+        cv_results = run_cross_validation(args, audio_files, labels, label_encoder, output_dir)
+        print(
+            "Validacion cruzada CNN+BiLSTM: "
+            f"{cv_results['mean_accuracy']:.4f} +/- {cv_results['std_accuracy']:.4f}"
+        )
 
+    x_train, y_train_text_augmented = load_training_features(
+        train_files,
+        y_train_text,
+        args.feature_type,
+        args.segment_duration,
+        args.overlap,
+        args.augmentations_per_segment,
+    )
+    x_val, y_val_text = load_features_without_augmentation(
+        validation_files,
+        y_val_text,
+        args.feature_type,
+        args.segment_duration,
+        args.overlap,
+    )
     y_train = label_encoder.transform(y_train_text_augmented)
     y_val = label_encoder.transform(y_val_text)
-    y_test = label_encoder.transform(y_test_text)
 
-    input_shape = (N_MELS, EXPECTED_TIME_STEPS, 1)
+    input_shape = get_input_shape(args.feature_type, args.segment_duration)
     num_classes = len(label_encoder.classes_)
 
     models_to_train = {
@@ -212,7 +341,15 @@ def main(args):
             args.batch_size,
         )
 
-        metrics = evaluate_model(trained_model, x_test, y_test, label_encoder.classes_)
+        metrics = evaluate_model_on_files(
+            trained_model,
+            test_files,
+            y_test_text,
+            label_encoder,
+            args.feature_type,
+            args.segment_duration,
+            args.overlap,
+        )
         metrics["best_validation_accuracy"] = float(val_accuracy)
 
         all_metrics[model_name] = metrics
@@ -236,20 +373,48 @@ def main(args):
     with open(model_dir / "label_encoder.pkl", "wb") as file:
         pickle.dump(label_encoder, file)
 
+    preprocessing_config = {
+        "feature_type": args.feature_type,
+        "segment_duration": args.segment_duration,
+        "overlap": args.overlap,
+    }
+    save_json(preprocessing_config, model_dir / "preprocessing_config.json")
+
     all_metrics["best_model"] = best_model_name
     save_json(all_metrics, output_dir / "metrics" / "metrics.json")
 
     print(f"Modelo guardado en: {model_dir / 'best_model.keras'}")
     print(f"Metricas guardadas en: {output_dir / 'metrics' / 'metrics.json'}")
+    print(f"Configuracion de preprocesamiento guardada en: {model_dir / 'preprocessing_config.json'}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Entrenar modelos con GTZAN")
-    parser.add_argument("--dataset_path", default="dataset", help="Ruta al dataset GTZAN")
-    parser.add_argument("--model_dir", default="models", help="Carpeta para guardar el modelo")
-    parser.add_argument("--output_dir", default="outputs", help="Carpeta para metricas y graficas")
-    parser.add_argument("--epochs", type=int, default=50, help="Numero maximo de epocas")
-    parser.add_argument("--batch_size", type=int, default=16, help="Tamano del batch")
+    parser.add_argument("--dataset_path", default=config.DATASET_PATH, help="Ruta al dataset GTZAN")
+    parser.add_argument("--model_dir", default=config.MODEL_DIR, help="Carpeta para guardar el modelo")
+    parser.add_argument("--output_dir", default=config.OUTPUT_DIR, help="Carpeta para metricas y graficas")
+    parser.add_argument("--epochs", type=int, default=config.EPOCHS, help="Numero maximo de epocas")
+    parser.add_argument("--cv_epochs", type=int, default=config.CV_EPOCHS, help="Epocas para cada fold de validacion cruzada")
+    parser.add_argument("--batch_size", type=int, default=config.BATCH_SIZE, help="Tamano del batch")
+    parser.add_argument("--segment_duration", type=float, default=config.SEGMENT_DURATION, help="Duracion de cada segmento en segundos")
+    parser.add_argument("--overlap", type=float, default=config.OVERLAP, help="Overlap entre segmentos. Ejemplo: 0.5")
+    parser.add_argument(
+        "--feature_type",
+        default=config.FEATURE_TYPE,
+        choices=["mel", "mfcc", "mfcc_delta"],
+        help="Tipo de features usadas por el modelo",
+    )
+    parser.add_argument(
+        "--augmentations_per_segment",
+        type=int,
+        default=config.AUGMENTATIONS_PER_SEGMENT,
+        help="Copias aumentadas por cada segmento de entrenamiento",
+    )
+    parser.add_argument(
+        "--skip_cross_validation",
+        action="store_true",
+        default=config.SKIP_CROSS_VALIDATION,
+        help="Omite la validacion cruzada si se quiere una prueba mas rapida",
+    )
 
     main(parser.parse_args())
-
