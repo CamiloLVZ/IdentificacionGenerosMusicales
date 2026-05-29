@@ -1,0 +1,16 @@
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+dataset/
+outputs/
+frontend/
+docs/
+
+training/
+!training/preprocessing.py
+
+*.md
