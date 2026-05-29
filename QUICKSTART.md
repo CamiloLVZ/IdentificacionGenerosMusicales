@@ -40,30 +40,46 @@ pip install -r requirements.txt
 
 ```bash
 cd backend
-uvicorn main:app --reload
+uvicorn main:app --host 0.0.0.0 --reload
 ```
 
-La API queda disponible en `http://localhost:8000`.
+- `--host 0.0.0.0` expone la API en todas las interfaces de red, lo que permite acceder al servicio desde otros equipos de la misma red local.
+- La API queda disponible en `http://<IP-del-servidor>:8000`.
+
+> Para conocer tu IP local ejecuta `ipconfig` (Windows) o `ip a` (Linux/macOS).
 
 ---
 
-## Uso
+## Endpoints
+
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| `GET` | `/` | Verifica que la API está activa |
+| `GET` | `/health` | Estado del servicio y del modelo |
+| `GET` | `/genres` | Lista de géneros que el modelo puede predecir |
+| `POST` | `/predict` | Clasifica un audio WAV |
 
 ### Documentación interactiva
 
-Abre en el navegador:
 ```
-http://localhost:8000/docs
+http://<IP-del-servidor>:8000/docs
 ```
 
-### Predecir género de un audio (curl)
+### Ejemplos con curl
 
 ```bash
+# Estado del servicio
+curl http://localhost:8000/health
+
+# Géneros disponibles
+curl http://localhost:8000/genres
+
+# Predecir género de un audio
 curl -X POST "http://localhost:8000/predict" \
      -F "file=@ruta/a/tu/audio.wav"
 ```
 
-### Respuesta esperada
+### Respuesta de /predict
 
 ```json
 {
@@ -78,3 +94,4 @@ curl -X POST "http://localhost:8000/predict" \
 ```
 
 > El archivo debe ser `.wav` de máximo 30 segundos.
+

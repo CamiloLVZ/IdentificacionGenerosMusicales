@@ -28,3 +28,6 @@ outputs/plots/*
 training/*
 !training/preprocessing.py
 
+# Frontend (interfaz gráfica independiente del servicio)
+frontend/
+
