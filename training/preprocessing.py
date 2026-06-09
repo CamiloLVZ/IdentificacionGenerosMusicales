@@ -12,6 +12,84 @@ import librosa
 import numpy as np
 
 
+# ---------------------------------------------------------------------------
+# Caché de espectrogramas
+# ---------------------------------------------------------------------------
+
+def get_feature_cache_dir(
+    cache_root: "str | Path",
+    feature_type: str = "mel",
+    sample_rate: int = 22050,
+    segment_duration: float = 4.0,
+    overlap: float = 0.5,
+) -> Path:
+    """
+    Devuelve la subcarpeta de caché para los parámetros dados.
+
+    El nombre de la carpeta codifica TODOS los parámetros relevantes.
+    Si cualquiera cambia, se usa una carpeta distinta y el caché se regenera
+    automáticamente sin necesidad de borrar nada a mano.
+
+    Ejemplo de ruta:  cache/mel_sr22050_dur4.0s_ov0.5/
+    """
+    cache_key = f"{feature_type}_sr{sample_rate}_dur{segment_duration}s_ov{overlap}"
+    return Path(cache_root) / cache_key
+
+
+def get_segment_cache_path(audio_file_path: "str | Path", cache_dir: Path) -> Path:
+    """
+    Ruta del archivo .npy de caché para un audio concreto.
+
+    Preserva la jerarquía género/nombre para facilitar la inspección manual:
+        cache/<key>/blues/blues.00000.npy
+    """
+    p = Path(audio_file_path)
+    genre = p.parent.name   # subcarpeta del género
+    stem = p.stem           # nombre sin extensión
+    return cache_dir / genre / f"{stem}.npy"
+
+
+def load_or_compute_segments(
+    audio_file: "str | Path",
+    cache_dir: Path,
+    sample_rate: int = 22050,
+    segment_duration: float = 4.0,
+    overlap: float = 0.5,
+    feature_type: str = "mel",
+) -> "tuple[np.ndarray, list]":
+    """
+    Intenta cargar los segmentos de espectrograma desde el caché.
+    Si no existen, los calcula desde el WAV y los guarda para futuras ejecuciones.
+
+    Siempre devuelve también los segmentos de audio crudos (float32) porque
+    el pipeline de augmentation los necesita para aplicar transformaciones
+    antes de calcular los features aumentados.
+
+    Returns:
+        base_features : ndarray, shape (n_segs, height, time_steps, 1)
+        audio_segments: list de arrays de audio crudo (uno por segmento)
+    """
+    cache_path = get_segment_cache_path(audio_file, cache_dir)
+
+    # Siempre necesitamos el audio crudo para la augmentación
+    audio, sr = load_audio(audio_file, sample_rate=sample_rate)
+    audio_segments = split_audio_into_segments(audio, sr, segment_duration, overlap)
+
+    if cache_path.exists():
+        base_features = np.load(str(cache_path))
+        return base_features, audio_segments
+
+    # Calcular y guardar en caché
+    base_features = np.array(
+        [audio_to_features(seg, sr, feature_type, segment_duration) for seg in audio_segments],
+        dtype=np.float32,
+    )
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(str(cache_path), base_features)
+
+    return base_features, audio_segments
+
+
 # Semilla fija para que los experimentos sean mas reproducibles.
 RANDOM_SEED = 42
 
