@@ -93,23 +93,25 @@ def load_or_compute_segments(
 # Semilla fija para que los experimentos sean mas reproducibles.
 RANDOM_SEED = 42
 
-# GTZAN normalmente viene con audios de 30 segundos.
-SAMPLE_RATE = 22050
-MAX_AUDIO_DURATION_SECONDS = 30
+try:
+    import training.config as config
+except ImportError:
+    import config
 
-# En lugar de usar una cancion completa como una sola muestra, dividimos el
-# audio en segmentos pequenos. Esto aumenta la cantidad de ejemplos y ayuda a
-# capturar patrones locales como ritmos, timbres e instrumentos.
-SEGMENT_DURATION_SECONDS = 4.0
-SEGMENT_OVERLAP = 0.5
+# Cargar parámetros de configuración de CNN10
+SAMPLE_RATE = config.SAMPLE_RATE
+MAX_AUDIO_DURATION_SECONDS = config.MAX_AUDIO_DURATION_SECONDS
+SEGMENT_DURATION_SECONDS = config.SEGMENT_DURATION_SECONDS
+SEGMENT_OVERLAP = config.SEGMENT_OVERLAP
 
-N_MELS = 128
-N_MFCC = 20
-N_FFT = 2048
-HOP_LENGTH = 512
+N_MELS = config.N_MELS
+N_FFT = config.N_FFT
+HOP_LENGTH = config.HOP_LENGTH
+FMIN = config.FMIN
+FMAX = config.FMAX
 
-# Feature por defecto. Opciones: "mel", "mfcc", "mfcc_delta".
-FEATURE_TYPE = "mel"
+# Feature por defecto.
+FEATURE_TYPE = config.FEATURE_TYPE
 
 # Generos oficiales del dataset GTZAN.
 GENRES = [
@@ -136,11 +138,7 @@ def get_feature_height(feature_type=FEATURE_TYPE):
     """Devuelve cuantas filas tendra la matriz de features."""
     if feature_type == "mel":
         return N_MELS
-    if feature_type == "mfcc":
-        return N_MFCC
-    if feature_type == "mfcc_delta":
-        return N_MFCC * 3
-    raise ValueError("feature_type debe ser 'mel', 'mfcc' o 'mfcc_delta'.")
+    raise ValueError("feature_type debe ser 'mel'.")
 
 
 def get_input_shape(feature_type=FEATURE_TYPE, segment_duration=SEGMENT_DURATION_SECONDS):
@@ -218,11 +216,7 @@ def audio_to_features(
     segment_duration=SEGMENT_DURATION_SECONDS,
 ):
     """
-    Convierte un segmento de audio en Mel Spectrogram o MFCCs.
-
-    MFCC + delta + delta-delta agrega informacion sobre como cambian las
-    caracteristicas en el tiempo. Es util en audio y sigue siendo facil de
-    explicar en una sustentacion.
+    Convierte un segmento de audio en Mel Spectrogram.
     """
     target_time_steps = get_expected_time_steps(segment_duration, sample_rate)
 
@@ -233,27 +227,13 @@ def audio_to_features(
             n_mels=N_MELS,
             n_fft=N_FFT,
             hop_length=HOP_LENGTH,
+            fmin=FMIN,
+            fmax=FMAX,
         )
         features = librosa.power_to_db(features, ref=np.max)
 
-    elif feature_type in ["mfcc", "mfcc_delta"]:
-        mfcc = librosa.feature.mfcc(
-            y=audio,
-            sr=sample_rate,
-            n_mfcc=N_MFCC,
-            n_fft=N_FFT,
-            hop_length=HOP_LENGTH,
-        )
-
-        if feature_type == "mfcc":
-            features = mfcc
-        else:
-            delta = librosa.feature.delta(mfcc)
-            delta_delta = librosa.feature.delta(mfcc, order=2)
-            features = np.concatenate([mfcc, delta, delta_delta], axis=0)
-
     else:
-        raise ValueError("feature_type debe ser 'mel', 'mfcc' o 'mfcc_delta'.")
+        raise ValueError("feature_type debe ser 'mel'.")
 
     features = normalize_features(features)
     features = pad_or_truncate(features, target_time_steps)
